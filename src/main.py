@@ -15,7 +15,7 @@ game_name: str = "Hivemind"
 def curses_main(stdscr: curses.window) -> None:
     curses.noecho()
     curses.curs_set(0)
-    stdscr.nodelay(True)
+    stdscr.nodelay(False)
     stdscr.keypad(True)
 
     def set_text(x, y, text, color=0):
@@ -60,9 +60,9 @@ def curses_main(stdscr: curses.window) -> None:
                 cont = True
 
     def percentage_to_color(v: float) -> str:
-        if v <= 0.3:
+        if v < 0.4:
             return 'r'
-        elif v <= 0.7:
+        elif v < 0.7:
             return 'y'
         return 'g'
 
@@ -86,7 +86,7 @@ def curses_main(stdscr: curses.window) -> None:
     # game size
     screen_size: tuple[int, int] = (80, 30)
 
-    game_size: tuple[int, int] = (78, 22)
+    game_size: tuple[int, int] = (58, 22)
 
     # get terminal bounds
     h, w = stdscr.getmaxyx()
@@ -101,11 +101,25 @@ def curses_main(stdscr: curses.window) -> None:
 
     level: Level = Level()
 
-    entities: list[Entity] = [Player(level.size[0] // 2, level.size[1] // 2)]
-    player: Player = entities[0]
+    entities: list[Entity] = level.entities
+    player: Player = None
+
+    for entity in entities:
+        if isinstance(entity, Player):
+            player = entity
+            break
+    
+    if player is None:
+        print("Player not found within level. Yell at the dev for this. It is her fault.")
+        return
+
+    messages: list[str] = []
+    max_messages: int = screen_size[1] - game_size[1] - 3
 
     cam_x: int = 0
     cam_y: int = 0
+
+    entity_map = {}
 
     active_visibility: list[bool] = level.seen.copy()
 
@@ -117,19 +131,33 @@ def curses_main(stdscr: curses.window) -> None:
 
         for x in range(level.size[0]):
             for y in range(level.size[1]):
-                if level.get_at(x, y)[0] in solids or any([e.solid and e.x == x and e.y == y for e in level.entities]):
+                if level.get_at(x, y)[0] in solids or ((x, y) in entity_map and entity_map[(x, y)].seethrough == False):
                     solid_tiles[y, x] = False
         
         fov = tcod.map.compute_fov(solid_tiles, (player.y, player.x), player.sight_radius, algorithm=tcod.constants.FOV_DIAMOND)
         for j in range(level.size[1]):
             for i in range(level.size[0]):
-                if fov[j, i]:
+                if fov[j, i] or (i - player.x, j - player.y) in [(0, 1), (0, -1), (1, 0), (-1, 0)]:
                     active_visibility[j * level.size[0] + i] = True
                     level.seen[j * level.size[0] + i] = True
                 else:
                     active_visibility[j * level.size[0] + i] = False
 
+    def update_entity_map():
+        nonlocal entity_map
+        entity_map = {(e.x, e.y): e for e in entities if e is not player}
+
+    def add_message(msg: str) -> None:
+        nonlocal messages
+        messages.append(": " + msg)
+        while len(messages) > max_messages:
+            messages.pop(0)
+
     update_visibility()
+    update_entity_map()
+    
+    cam_x = clamp(player.x - game_size[0] // 2, 0, level.size[0] - game_size[0])
+    cam_y = clamp(player.y - game_size[1] // 2, 0, level.size[1] - game_size[1])
 
     is_running: bool = True
 
@@ -158,44 +186,94 @@ def curses_main(stdscr: curses.window) -> None:
         
         # draw the in-game info
         for y in range(game_size[1] + 1):
-            for x in range(game_size[0]):
+            for x in range(screen_size[0] - 2):
                 # line splitting the UI from the game
                 if y == game_size[1]:
                     stdscr.addch(oy + y + 1, ox + x + 1, '-', curses.color_pair(0))
-                else:
+                elif x < game_size[0]:
                     stdscr.addch(oy + y + 1, ox + x + 1, '.', curses.color_pair(0))
         
         # UI mid-way line
         for y in range(screen_size[1] - game_size[1] - 1):
-            stdscr.addch(oy + game_size[1] + 1 + y, ox + game_size[0] // 2 - 1, '+' if y in [0, screen_size[1] - game_size[1] - 2] else '|')
+            stdscr.addch(oy + game_size[1] + 1 + y, ox + screen_size[0] // 2 - 1, '+' if y in [0, screen_size[1] - game_size[1] - 2] else '|')
+        # backpack seperator line
+        for y in range(game_size[1] + 2):
+            stdscr.addch(oy + y, ox + game_size[0] + 1, '+' if y in [0, game_size[1] + 1] else '|')
 
         # draw level
         level.draw(active_visibility, stdscr, ox, oy, cam_x, cam_y, game_size)
 
         # draw entities
         for entity in entities:
-            entity.draw(stdscr, ox, oy, cam_x, cam_y, game_size)
+            if entity is player:
+                continue
+            entity.draw(level, active_visibility, stdscr, ox, oy, cam_x, cam_y, game_size)
+        
+        player.draw(level, active_visibility, stdscr, ox, oy, cam_x, cam_y, game_size)
 
         # draw UI
         health_color = percentage_to_color(player.health / player.max_health)
         food_color = percentage_to_color(player.food / player.max_food)
         water_color = percentage_to_color(player.water / player.max_water)
-        set_text(ox + 1, oy + game_size[1] + 2, f"  `rHp`: `{health_color}{str(player.health).rjust(2, '0')}`/`g{player.max_health}` x `yFd`: `{food_color}{str(player.food).rjust(2, '0')}`/`g{player.max_food}` x `bWt`: `{water_color}{str(player.water).rjust(2, '0')}`/`g{player.max_water}`")
+        set_text(ox + 1, oy + game_size[1] + 2, "\n".join([
+            f"  `rHp`: `{health_color}{str(player.health).rjust(2, '0')}`/`g{player.max_health}` x `yFd`: `{food_color}{str(player.food).rjust(2, '0')}`/`g{player.max_food}` x `bWt`: `{water_color}{str(player.water).rjust(2, '0')}`/`g{player.max_water}`",
+            f"  `cVsn`: `{percentage_to_color(player.sight_radius / 10)}{player.sight_radius}`    x `mNse`: `{percentage_to_color((10 - player.noise) / 10)}{player.noise}`"
+        ]))
+        # draw messages
+        for y, message in enumerate(messages):
+            set_text(ox + screen_size[0] // 2, oy + game_size[1] + 2 + y, message)
+
+        # stats text
+        stdscr.addstr(oy + game_size[1] + 1, ox + 2, "Stats")
+        # messages text
+        stdscr.addstr(oy + game_size[1] + 1, ox + screen_size[0] // 2 + 1, "Messages")
+        # backpack text
+        stdscr.addstr(oy, ox + game_size[0] + 3, "Backpack")
 
         # user input
-        key: int = stdscr.getch()
-        
+        try:
+            key: int = stdscr.get_wch()
+        except:
+            # no key pressed
+            key: int = -1
+
+        key_up: int = curses.KEY_UP
+        key_down: int = curses.KEY_DOWN
+        key_left: int = curses.KEY_LEFT
+        key_right: int = curses.KEY_RIGHT
+
+        key_shift_up: int = 0x223
+        key_shift_down: int = 0x224
+        key_shift_left: int = 0x187
+        key_shift_right: int = 0x190
+
         dx, dy = 0, 0
         if key != -1:
-            match key:
-                case curses.KEY_UP: dx, dy = 0, -1
-                case curses.KEY_DOWN: dx, dy = 0, 1
-                case curses.KEY_LEFT: dx, dy = -1, 0
-                case curses.KEY_RIGHT: dx, dy = 1, 0
-                case 97:
-                    player.health = max(0, player.health - random.randint(1, 2))
-                    player.food = max(0, player.food - random.randint(1, 2))
-                    player.water = max(0, player.water - random.randint(1, 2))
+            player.action = "move"
+            if key == key_up:
+                dx, dy = 0, -1
+            elif key == key_down:
+                dx, dy = 0, 1
+            elif key == key_left:
+                dx, dy = -1, 0
+            elif key == key_right:
+                dx, dy = 1, 0
+            elif key == key_shift_up:
+                dx, dy = 0, -1
+                player.action = "attack"
+            elif key == key_shift_down:
+                dx, dy = 0, 1
+                player.action = "attack"
+            elif key == key_shift_left:
+                dx, dy = -1, 0
+                player.action = "attack"
+            elif key == key_shift_right:
+                dx, dy = 1, 0
+                player.action = "attack"
+            elif key == 97:
+                player.health = max(0, player.health - random.randint(1, 2))
+                player.food = max(0, player.food - random.randint(1, 2))
+                player.water = max(0, player.water - random.randint(1, 2))
 
         if dx or dy:
             player.x += dx
@@ -203,9 +281,26 @@ def curses_main(stdscr: curses.window) -> None:
             if level.get_at(player.x, player.y)[0] in solids:
                 player.x -= dx
                 player.y -= dy
+            else:
+                if (player.x, player.y) in entity_map:
+                    entity = entity_map[(player.x, player.y)]
+
+                    if entity.solid:
+                        player.x -= dx
+                        player.y -= dy
+                        # if the player collides with an entity, bump interact with it
+                        message = entity.on_bump_interact(player)
+                    else:
+                        message = entity.on_pass_over(player)
+
+                    if message is not None:
+                        add_message(message)
+                    if entity.marked_for_death:
+                        entities.remove(entity)
 
             update_visibility()
-            
+            update_entity_map()
+
         # move the camera
         cam_x = clamp(player.x - game_size[0] // 2, 0, level.size[0] - game_size[0])
         cam_y = clamp(player.y - game_size[1] // 2, 0, level.size[1] - game_size[1])
