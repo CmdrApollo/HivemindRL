@@ -1,1 +1,1 @@
-"# HivemindRL" 
+# HivemindRL
