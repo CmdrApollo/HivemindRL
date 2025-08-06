@@ -62,7 +62,7 @@ class Player(Entity):
     
         self.action = "move"
 
-        self.statuses: list[StatusEffect] = [s for s in StatusEffect]
+        self.statuses: list[StatusEffect] = []
 
         self.last_sleep_time = 0
     
@@ -154,3 +154,30 @@ class Corpse(Entity):
         if self.time_since_beginning >= self.time_to_turn:
             self.marked_for_death = True
             self.to_zombie = True
+
+class Zombie(Entity):
+    def __init__(self, x, y):
+        super().__init__(x, y, 8, "Zombie", "A zombie.", "z", 2, True, False, False)
+
+        self.time_since_beginning = 0
+        self.time_to_turn = random.randint(800, 2000)
+
+        # zombies are bloaters 1% of the time
+        self.is_bloater = random.random() < 0.01
+        if self.is_bloater:
+            self.char = 'B'
+    
+    def on_bump_interact(self, player):
+        old_health = self.health
+        self.health = max(0, self.health - random.randint(1, 2))
+        if self.health == 0:
+            self.marked_for_death = True
+            return f"You manage to `rfell` the `g{self.name}`."
+        return f"You deal `y{old_health - self.health}` damage to the `g{self.name}`."
+        
+    def on_my_turn(self, player):
+        self.time_since_beginning += 1
+
+        if self.time_since_beginning >= self.time_to_turn:
+            self.is_bloater = True
+            self.char = 'B'

@@ -170,6 +170,30 @@ def curses_main(stdscr: curses.window) -> None:
         while len(messages) > max_messages:
             messages.pop(0)
 
+    def take_entity_turn(entity):
+        nonlocal entities
+        def corpse_zombie_conversion(entity):
+            if isinstance(entity, Corpse):
+                if entity.to_zombie:
+                    entities.append(Zombie(entity.x, entity.y))
+            elif isinstance(entity, Zombie):
+                if entity.is_bloater:
+                    pass
+                else:
+                    # TODO FIX
+                    entities.append(Corpse(entity.x, entity.y))
+
+        entity.on_my_turn(player)
+        if entity.marked_for_death:
+            corpse_zombie_conversion(entity)
+            entities.remove(entity)
+        elif StatusEffect.Exhausted in player.statuses:
+            # entities get a second turn when the player is exhausted
+            entity.on_my_turn(player)
+            if entity.marked_for_death:
+                corpse_zombie_conversion(entity)
+                entities.remove(entity)
+
     update_visibility()
     update_entity_map()
     
@@ -373,6 +397,18 @@ def curses_main(stdscr: curses.window) -> None:
                                         ch = level.get_at(player.x + i, player.y + j)[0]
                                         if ch == '.':
                                             level.set_at(player.x + i, player.y + j, '~', 1)
+                        case StatusEffect.Dehydrated:
+                            player.health = max(0, player.health - 1)
+                            add_message("You are dehyrdated and take `y1` damage.")
+                        case StatusEffect.Exhausted:
+                            pass
+                        case StatusEffect.Infected:
+                            if random.random() < 0.1:
+                                # 10% chance of taking damage when infected
+                                add_message("You are infected, and take `y1` damage.")
+                        case StatusEffect.Starving:
+                            player.health = max(0, player.health - 1)
+                            add_message("You are starving and take `y1` damage.")
 
                 # every value in the noise map decreases by one
                 for y in range(level.size[1]):
@@ -383,9 +419,9 @@ def curses_main(stdscr: curses.window) -> None:
                 # we then propogate noise from the player's position again
                 propogate_noise(player.x, player.y, player.noise)
                 
-                for entity in entities:
+                for entity in entities[::-1]:
                     if entity is not player:
-                        entity.on_my_turn(player)
+                        take_entity_turn(entity)
 
             update_visibility()
             update_entity_map()
