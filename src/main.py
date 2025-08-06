@@ -1,6 +1,7 @@
 import curses
 import random
 import numpy as np
+import time
 
 from entity import *
 from level import *
@@ -15,7 +16,7 @@ game_name: str = "Hivemind"
 def curses_main(stdscr: curses.window) -> None:
     curses.noecho()
     curses.curs_set(0)
-    stdscr.nodelay(False)
+    stdscr.nodelay(True)
     stdscr.keypad(True)
 
     def set_text(x, y, text, color=0):
@@ -79,6 +80,8 @@ def curses_main(stdscr: curses.window) -> None:
         curses.init_pair(5, curses.COLOR_CYAN, curses.COLOR_BLACK)
         curses.init_pair(6, curses.COLOR_MAGENTA, curses.COLOR_BLACK)
         curses.init_pair(7, curses.COLOR_WHITE, curses.COLOR_BLACK)
+        curses.init_pair(8, curses.COLOR_BLACK, curses.COLOR_RED)
+        curses.init_pair(9, curses.COLOR_BLACK, curses.COLOR_WHITE)
     else:
         print(f"{game_name} requires an 8-color terminal.")
         return
@@ -122,6 +125,20 @@ def curses_main(stdscr: curses.window) -> None:
     entity_map = {}
 
     active_visibility: list[bool] = level.seen.copy()
+    noise_map: list[int] = [0 for _ in range(level.size[0] * level.size[1])]
+
+    def propogate_noise(x, y, radius, intensity=1):
+        if radius == 0:
+            return
+        
+        for cx in range(x - radius, x + radius + 1):
+            for cy in range(y - radius, y + radius + 1):
+                dist = distance(cx, cy, x, y)
+
+                if dist <= radius:
+                    noise_map[cy * level.size[0] + cx] += round((1 - dist / radius) * intensity)
+
+    propogate_noise(player.x, player.y, player.noise + 2, player.noise + 2)
 
     def update_visibility():
         nonlocal active_visibility
@@ -159,9 +176,13 @@ def curses_main(stdscr: curses.window) -> None:
     cam_x = clamp(player.x - game_size[0] // 2, 0, level.size[0] - game_size[0])
     cam_y = clamp(player.y - game_size[1] // 2, 0, level.size[1] - game_size[1])
 
+    invert_timer = 0
+
     is_running: bool = True
 
     while is_running:
+        invert_timer = max(0, invert_timer - 0.1)
+
         # clear the screen before anything else
         stdscr.clear()
 
@@ -209,7 +230,13 @@ def curses_main(stdscr: curses.window) -> None:
                 continue
             entity.draw(level, active_visibility, stdscr, ox, oy, cam_x, cam_y, game_size)
         
-        player.draw(level, active_visibility, stdscr, ox, oy, cam_x, cam_y, game_size)
+        player.draw(level, active_visibility, stdscr, ox, oy, cam_x, cam_y, game_size, invert_timer > 0)
+
+        # if int(time.time() * 2) & 1:
+        #     for y in range(level.size[1]):
+        #         for x in range(level.size[0]):
+        #             if 0 <= y - cam_y < game_size[1] and 0 <= x - cam_x < game_size[0] and noise_map[y * level.size[0] + x]:
+        #                 stdscr.addstr(oy + y + 1 - cam_y, ox + x + 1 - cam_x, hex(noise_map[y * level.size[0] + x]).removeprefix('0x'), curses.color_pair(noise_map[y * level.size[0] + x]))
 
         # draw UI
         health_color = percentage_to_color(player.health / player.max_health)
@@ -219,6 +246,22 @@ def curses_main(stdscr: curses.window) -> None:
             f"  `rHp`: `{health_color}{str(player.health).rjust(2, '0')}`/`g{player.max_health}` x `yFd`: `{food_color}{str(player.food).rjust(2, '0')}`/`g{player.max_food}` x `bWt`: `{water_color}{str(player.water).rjust(2, '0')}`/`g{player.max_water}`",
             f"  `cVsn`: `{percentage_to_color(player.sight_radius / 10)}{player.sight_radius}`    x `mNse`: `{percentage_to_color((10 - player.noise) / 10)}{player.noise}`"
         ]))
+
+        t = ""
+        for i, p_status in enumerate(player.statuses):
+            t += {
+                StatusEffect.Bleeding: "`rBleeding`",
+                StatusEffect.Dehydrated: "`cDehydrated`",
+                StatusEffect.Exhausted: "`mExhausted`",
+                StatusEffect.Infected: "`gInfected`",
+                StatusEffect.Starving: "`yStarving`",
+            }[p_status] + "   "
+            if i % 3 == 2:
+                set_text(ox + 3, oy + game_size[1] + 5 + i // 3, t)
+                t = ""
+        if len(t):
+            set_text(ox + 3, oy + game_size[1] + 5 + i // 3, t)
+
         # draw messages
         for y, message in enumerate(messages):
             set_text(ox + screen_size[0] // 2, oy + game_size[1] + 2 + y, message)
@@ -275,7 +318,12 @@ def curses_main(stdscr: curses.window) -> None:
                 player.food = max(0, player.food - random.randint(1, 2))
                 player.water = max(0, player.water - random.randint(1, 2))
 
+        old_health = player.health
+
         if dx or dy:
+            old_x = player.x
+            old_y = player.y
+
             player.x += dx
             player.y += dy
             if level.get_at(player.x, player.y)[0] in solids:
@@ -297,6 +345,47 @@ def curses_main(stdscr: curses.window) -> None:
                         add_message(message)
                     if entity.marked_for_death:
                         entities.remove(entity)
+            
+            if player.x != old_x or player.y != old_y:
+                if level.get_at(player.x, player.y)[0] == '~':
+                    # if the player passes over blood, have a chance of infection
+                    if random.random() < 0.1 * (1 + (StatusEffect.Bleeding in player.statuses)):
+                        if StatusEffect.Infected not in player.statuses:
+                            player.add_status(StatusEffect.Infected)
+                            add_message("You have become infected.")
+
+
+                # we actually moved, so update status effects and allow
+                # other entities to take their turns
+                for status in list(player.statuses):
+                    match status:
+                        case StatusEffect.Bleeding:
+                            player.health = max(0, player.health - 1)
+                            add_message("You `rbleed out`, dealing `y1` damage.")
+                            if random.random() < 0.05:
+                                # 5% chance to stop bleeding
+                                player.remove_status(StatusEffect.Bleeding)
+                                add_message("You stop bleeding.")
+                            # put blood on the floor
+                            for i in range(-1, 2):
+                                for j in range(-1, 2):
+                                    if random.random() < 0.5:
+                                        ch = level.get_at(player.x + i, player.y + j)[0]
+                                        if ch == '.':
+                                            level.set_at(player.x + i, player.y + j, '~', 1)
+
+                # every value in the noise map decreases by one
+                for y in range(level.size[1]):
+                    for x in range(level.size[0]):
+                        value = noise_map[y * level.size[0] + x]
+                        noise_map[y * level.size[0] + x] = max(0, value - 1)
+
+                # we then propogate noise from the player's position again
+                propogate_noise(player.x, player.y, player.noise)
+                
+                for entity in entities:
+                    if entity is not player:
+                        entity.on_my_turn(player)
 
             update_visibility()
             update_entity_map()
@@ -305,6 +394,9 @@ def curses_main(stdscr: curses.window) -> None:
         cam_x = clamp(player.x - game_size[0] // 2, 0, level.size[0] - game_size[0])
         cam_y = clamp(player.y - game_size[1] // 2, 0, level.size[1] - game_size[1])
 
+        if player.health != old_health:
+            invert_timer = 2
+            
         # refresh and move on!
         stdscr.refresh()
 
